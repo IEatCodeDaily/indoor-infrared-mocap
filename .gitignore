@@ -1,0 +1,5 @@
+#python venv
+.venv
+
+#footage folders
+footage*

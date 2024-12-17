@@ -1,0 +1,35 @@
+[tool.poetry]
+name = "lcm-app"
+version = "0.1.0"
+description = "Python app for Low Cost Motion Capture"
+authors = ["IEatCodeDaily <raisalpwardana@gmail.com>"]
+license = "MIT License"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10.11"
+numpy = "^2.2.0"
+matplotlib = "^3.9.3"
+pyvista = "0.44.2"
+panel = "^1.5.4"
+pycolmap = "^3.11.1"
+opencv-contrib-python = "^4.10.0.84"
+
+[tool.poetry.group.dev]
+optional = true
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.5"
+jupyter = "^1.1.1"
+ipywidgets = "7.7.1"
+ipyvtklink = "0.2.3"
+panel = "^1.5.4"
+trame = "^3.7.1"
+trame-client = "^3.5.0"
+trame-server = "^3.2.3"
+trame-vtk = "^2.8.12"
+trame-vuetify = "^2.7.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
