@@ -1,3 +1,8 @@
+# Uncomment if you want to generate local .venv
 [virtualenvs]
 create = true
 in-project = true
+
+
+[env]
+PATH = "E:\\Projects\\indoor-infrared-mocap\\opencv_build\\install\\x64\\vc17\\bin;{env:PATH}"

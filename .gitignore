@@ -2,4 +2,10 @@
 .venv
 
 #footage folders
-footage*
+footage_calibration
+
+#sandbox
+sandbox*
+
+#pytest cache
+.pytest_cache

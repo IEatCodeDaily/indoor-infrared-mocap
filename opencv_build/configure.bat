@@ -1,6 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
 
+:: DEPRECATED WARNING
+echo WARNING: This script is deprecated and will be removed in future versions.
+echo Please use the new build scripts located in the build directory.
+
 :: ===== Python Check =====
 
 :: First check if we're in a Poetry environment
