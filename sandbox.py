@@ -1,63 +1,71 @@
-import numpy as np
-import pyvista as pv
-import ipywidgets as widgets
-from IPython.display import display
+import time
+from pathlib import Path
+from irtracking.camera.system import PointTracker, CameraParamsManager
+import cv2
+import threading
 
-# Set up PyVista for Jupyter
-pv.set_jupyter_backend('trame')
-pv.set_plot_theme('document')
+# Tracker System Prototype
 
-# Create a simple test visualization first
-def test_visualization():
-    pl = pv.Plotter(notebook=True, window_size=[1024, 768])
-    # Add a sphere at origin
-    sphere = pv.Sphere(radius=0.5, center=(0, 0, 0))
-    pl.add_mesh(sphere, color='red')
-    pl.add_axes()
-    pl.show_grid()
-    return pl
+# Get video files
+footage_dir = Path("footage_calibration")
+video_files = sorted(footage_dir.glob("*.mp4"))
+print(video_files)
 
-print("Testing basic visualization...")
-test_pl = test_visualization()
+camera_params_manager = CameraParamsManager()
+trackers = [PointTracker(i, camera_params_manager) for i in range(4)]
 
-# If that works, let's modify the CameraVisualizer to be simpler first
-class SimpleCameraVisualizer:
-    def __init__(self):
-        # Just use first two cameras for testing
-        self.positions = np.array([
-            [ 0.99382967, 2.59333162, 2.95762625],
-            [-1.84272602, 0.87304613, 3.97750837],
-            [ 1.38108843, -2.52164672, 3.08849918],
-            [ 3.17016849, -0.55979842, 3.5615908 ]
-        ])
+def process_video(video_file, tracker):
+    cap = cv2.VideoCapture(str(video_file))
+    frames = []       
         
-        self.pl = pv.Plotter(notebook=True, window_size=[1024, 768])
-        
-    def show(self):
-        # Add coordinate axes and grid
-        self.pl.add_axes()
-        self.pl.show_grid()
-        
-        # Add spheres at camera positions
-        for pos in self.positions:
-            # Create sphere at camera position
-            sphere = pv.Sphere(radius=0.2, center=pos)
-            self.pl.add_mesh(sphere, color='blue')
-            
-            # Add text label
-            self.pl.add_point_labels([pos], [f"Camera at {pos}"])
-        
-        # Add connecting lines between cameras
-        for i in range(len(self.positions)-1):
-            line = pv.Line(self.positions[i], self.positions[i+1])
-            self.pl.add_mesh(line, color='red', line_width=2)
-        
-        # Set camera position for better view
-        self.pl.camera_position = 'xy'
-        self.pl.reset_camera()
-        
-        return self.pl
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
 
-print("\nTesting camera visualization...")
-viz = SimpleCameraVisualizer()
-viz.show()
+    cap.release()
+
+    # Process the buffered frames
+    frame_number = 0
+    average_frame_processing_time = 0
+    for frame in frames:
+        start_time = time.time()
+
+        # Feed the frame to the tracker
+
+        # Get the tracked points
+        tracked_points, frame_output = tracker.detect_points(frame)
+        frame_output = cv2.cvtColor(frame_output, cv2.COLOR_GRAY2BGR)
+
+        # Draw the tracked points
+        for point, confidence in tracked_points:
+            cv2.circle(frame_output, (int(point.x), int(point.y)), 2, (0, 255, 0), -1)
+
+        # Display the frame
+        cv2.imshow(f"Tracked Points {video_files.index(video_file)}", frame_output)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+        end_time = time.time()
+        frame_processing_time = end_time - start_time
+        average_frame_processing_time += frame_processing_time
+        #print(f"Video {video_files.index(video_file)} - Frame {frame_number} processing time: {frame_processing_time} seconds")
+        frame_number += 1
+        if frame_number == 200:
+            break
+    
+    average_frame_processing_time /= frame_number
+    print(f"Video {video_files.index(video_file)} - Average frame processing time: {average_frame_processing_time} seconds")
+
+    cv2.destroyWindow(f"Tracked Points {video_files.index(video_file)}")
+# Create and start threads for each video
+threads = []
+for i in range(len(video_files)):
+    thread = threading.Thread(target=process_video, args=(video_files[i], trackers[i]))
+    threads.append(thread)
+    thread.start()
+
+# Wait for all threads to finish
+for thread in threads:
+    thread.join()

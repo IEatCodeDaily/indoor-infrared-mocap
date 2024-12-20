@@ -1,5 +1,11 @@
+:: DEPRECATED: This script is deprecated and will be removed in future versions.
+
 @echo off
 setlocal enabledelayedexpansion
+
+:: DEPRECATED WARNING
+echo WARNING: This script is deprecated and will be removed in future versions.
+echo Please use the new build scripts located in the build directory.
 
 :: Parse command line arguments
 set BUILD_DEBUG=0
