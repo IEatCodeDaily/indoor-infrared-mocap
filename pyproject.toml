@@ -1,13 +1,16 @@
 [tool.poetry]
 name = "irtracking"
+name = "irtracking"
 version = "0.1.0"
 description = "Python app for Low Cost Motion Capture"
 authors = ["IEatCodeDaily <raisalpwardana@gmail.com>"]
 license = "MIT License"
 readme = "README.md"
 packages = [{include = "irtracking"}]
+packages = [{include = "irtracking"}]
 
 [tool.poetry.dependencies]
+python = "~3.10.11"
 python = "~3.10.11"
 numpy = "^2.2.0"
 matplotlib = "^3.9.3"
@@ -38,8 +41,14 @@ pytest = "^8.3.4"
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+pytest = "^8.3.4"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
 

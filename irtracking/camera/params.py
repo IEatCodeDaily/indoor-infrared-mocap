@@ -5,6 +5,22 @@ import numpy as np
 import json
 
 @dataclass
+<<<<<<< HEAD
+=======
+class Point2D:
+    x: float
+    y: float
+    confidence: float = 1.0
+
+@dataclass
+class Point3D:
+    x: float
+    y: float
+    z: float
+    confidence: float = 1.0
+
+@dataclass
+>>>>>>> 24f5e0fd324c64481b858610791092b677e3c71f
 class IntrinsicParams:
     matrix: np.ndarray
     distortion: np.ndarray
@@ -24,24 +40,43 @@ class IntrinsicParams:
 
 @dataclass
 class ExtrinsicParams:
+<<<<<<< HEAD
     t: np.ndarray  # 3D position vector
     R: np.ndarray  # 3x3 rotation matrix
+=======
+    position: np.ndarray  # 3D position vector
+    rotation: np.ndarray  # 3x3 rotation matrix
+>>>>>>> 24f5e0fd324c64481b858610791092b677e3c71f
     
     @classmethod
     def from_dict(cls, data: Dict) -> 'ExtrinsicParams':
         return cls(
+<<<<<<< HEAD
             position=np.array(data['t'], dtype=np.float64),
             rotation=np.array(data['R'], dtype=np.float64)
+=======
+            position=np.array(data['position'], dtype=np.float64),
+            rotation=np.array(data['rotation'], dtype=np.float64)
+>>>>>>> 24f5e0fd324c64481b858610791092b677e3c71f
         )
     
     def to_dict(self) -> Dict:
         return {
+<<<<<<< HEAD
             't': self.t.tolist(),
             'R': self.R.tolist()
         }
 
 class CameraParamsManager:
     def __init__(self, config_dir: Optional[Path] = Path("config")):
+=======
+            'position': self.position.tolist(),
+            'rotation': self.rotation.tolist()
+        }
+
+class CameraParamsManager:
+    def __init__(self, config_dir: Path = "config"):
+>>>>>>> 24f5e0fd324c64481b858610791092b677e3c71f
         self.config_dir = config_dir
         self.intrinsic: Dict[int, IntrinsicParams] = {}
         self.extrinsic: Dict[int, ExtrinsicParams] = {}
@@ -53,9 +88,15 @@ class CameraParamsManager:
         self.load_intrinsic_params()
         self.load_extrinsic_params()
     
+<<<<<<< HEAD
     def load_intrinsic_params(self, filename: Path = "camera-intrinsic.json") -> None:
         """Load and parse intrinsic parameters"""
         path = self.config_dir / Path(filename)
+=======
+    def load_intrinsic_params(self, filename: str = "camera-intrinsic.json") -> None:
+        """Load and parse intrinsic parameters"""
+        path = self.config_dir / filename
+>>>>>>> 24f5e0fd324c64481b858610791092b677e3c71f
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {path}")
         
@@ -67,9 +108,15 @@ class CameraParamsManager:
             camera_id = cam_data['camera_id']
             self.intrinsic[camera_id] = IntrinsicParams.from_dict(cam_data)
     
+<<<<<<< HEAD
     def load_extrinsic_params(self, filename: Path = "camera-extrinsic.json") -> None:
         """Load and parse extrinsic parameters"""
         path = self.config_dir / Path(filename)
+=======
+    def load_extrinsic_params(self, filename: str = "camera-extrinsic.json") -> None:
+        """Load and parse extrinsic parameters"""
+        path = self.config_dir / filename
+>>>>>>> 24f5e0fd324c64481b858610791092b677e3c71f
         if not path.exists():
             return  # Extrinsic params are optional
         
@@ -81,10 +128,15 @@ class CameraParamsManager:
             camera_id = cam_data['camera_id']
             self.extrinsic[camera_id] = ExtrinsicParams.from_dict(cam_data)
             
+<<<<<<< HEAD
     def get_intrinsic_params(self, camera_id: int = None) -> Optional[IntrinsicParams]:
         """Get intrinsic parameters for a specific camera"""
         if camera_id == None:
             return self.intrinsic
+=======
+    def get_intrinsic_params(self, camera_id: int) -> Optional[IntrinsicParams]:
+        """Get intrinsic parameters for a specific camera"""
+>>>>>>> 24f5e0fd324c64481b858610791092b677e3c71f
         return self.intrinsic.get(camera_id)
 
     def get_extrinsic_params(self, camera_id: int) -> Optional[ExtrinsicParams]:
