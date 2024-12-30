@@ -16,7 +16,7 @@ class Point3D:
     y: float
     z: float
 
-class PointTracker:
+class PointDetector:
     def __init__(self, camera_id: int, params_manager: CameraParamsManager):
         self.camera_id = camera_id
         self.params_manager = params_manager
@@ -24,6 +24,35 @@ class PointTracker:
         self.params_manager.add_observer(self.update_params)
         self.morph_kernel = np.array([[0, 1, 0],[1, 1, 1],[0, 1, 0]], np.uint8)
 
+        self.frame_in_queue = queue.Queue(maxsize=1)
+        self.points_queue = queue.Queue(maxsize=1)
+        self.frame_out_queue = queue.Queue(maxsize=1)
+
+        self._running = False
+        self.track_thread = threading.Thread(target=self._detect_loop)
+
+    def start(self):
+        """Start camera capture thread"""
+        self._running = True
+        self.track_thread.start()
+    
+    def stop(self):
+        """Stop camera capture thread"""
+        self._running = False
+        self.track_thread.join()
+    
+    def _detect_loop(self):
+        """Continuously detect points in frames"""
+        while self._running:
+            try:
+                frame = self.frame_in_queue.get(block=True, timeout=0.1)  # Timeout mode
+            except queue.Empty:
+                print("Queue is empty and no item was retrieved within the timeout period.")
+                continue
+            self.frame_in_queue.task_done()
+            points, morph = self.detect_points(frame)
+            self.points_queue.put(points, timeout=0.1)
+            self.frame_out_queue.put(morph, block=False)
 
     def detect_points(self, frame: np.ndarray) -> List[Tuple[Point2D, float]]:
         """Detect IR LED points in frame"""
@@ -33,6 +62,8 @@ class PointTracker:
         # Convert to grayscale
         gray = cv2.cvtColor(undistorted, cv2.COLOR_BGR2GRAY)
 
+
+        # Thanks to Joshua Bird @jyjblrd
         kernel = np.array([[-2, -1, -1, -1, -2],
                             [-1,  1,  3,  1, -1],
                             [-1,  3,  4,  3, -1],

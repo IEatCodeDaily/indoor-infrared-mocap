@@ -24,20 +24,20 @@ class IntrinsicParams:
 
 @dataclass
 class ExtrinsicParams:
-    position: np.ndarray  # 3D position vector
-    rotation: np.ndarray  # 3x3 rotation matrix
+    t: np.ndarray  # 3D position vector
+    R: np.ndarray  # 3x3 rotation matrix
     
     @classmethod
     def from_dict(cls, data: Dict) -> 'ExtrinsicParams':
         return cls(
-            position=np.array(data['position'], dtype=np.float64),
-            rotation=np.array(data['rotation'], dtype=np.float64)
+            position=np.array(data['t'], dtype=np.float64),
+            rotation=np.array(data['R'], dtype=np.float64)
         )
     
     def to_dict(self) -> Dict:
         return {
-            'position': self.position.tolist(),
-            'rotation': self.rotation.tolist()
+            't': self.t.tolist(),
+            'R': self.R.tolist()
         }
 
 class CameraParamsManager:
@@ -81,8 +81,10 @@ class CameraParamsManager:
             camera_id = cam_data['camera_id']
             self.extrinsic[camera_id] = ExtrinsicParams.from_dict(cam_data)
             
-    def get_intrinsic_params(self, camera_id: int) -> Optional[IntrinsicParams]:
+    def get_intrinsic_params(self, camera_id: int = None) -> Optional[IntrinsicParams]:
         """Get intrinsic parameters for a specific camera"""
+        if camera_id == None:
+            return self.intrinsic
         return self.intrinsic.get(camera_id)
 
     def get_extrinsic_params(self, camera_id: int) -> Optional[ExtrinsicParams]:
