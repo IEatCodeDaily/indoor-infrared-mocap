@@ -2,7 +2,7 @@ import pytest
 import json
 import numpy as np
 from pathlib import Path
-from irtracking.camera.params import CameraParamsManager, IntrinsicParams, ExtrinsicParams
+from irtracking.params import CameraParamsManager, IntrinsicParams, ExtrinsicParams
 from typing import Dict
 import os
 
