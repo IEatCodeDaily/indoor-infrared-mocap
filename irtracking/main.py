@@ -6,12 +6,12 @@ import os
 import time 
 from multiprocessing import Manager
 from multiprocessing.managers import SyncManager
-from irtracking.system import LocalizationSystem
-from irtracking.capture import PointDetector
-from irtracking.world import WorldReconstructor
-from irtracking.collector import OutputCollector
-from irtracking.params import CameraParamsManager, ProcessFlags
-from irtracking.objects import ObjectManager, ObjectDetector
+from irtracking.system import *
+from irtracking.capture import *
+from irtracking.world import *
+from irtracking.collector import *
+from irtracking.params import *
+from irtracking.objects import *
 import multiprocessing
 
 class TrackingGUI:
@@ -23,11 +23,7 @@ class TrackingGUI:
         # Initialize multiprocessing manager
         self.manager = Manager()
         if self.manager is None:
-            raise RuntimeError("Failed to create multiprocessing manager")
-        
-        # Create flags dictionary
-        self.flags = self.manager.Namespace()
-        self.flags.timing_enabled = True        
+            raise RuntimeError("Failed to create multiprocessing manager")    
         
 
         # Create tkinter variable for GUI checkbox
@@ -56,7 +52,7 @@ class TrackingGUI:
         
         # Create shared flags using the manager
         self.process_flags = ProcessFlags()
-        self.process_flags.timing_enabled.set()  # Initialize to True
+        self.process_flags.timing_enabled.clear() # Initialize to False
         
         # Initialize components and share the SAME flags instance
         self.detectors = [

@@ -25,7 +25,7 @@ class Point3D:
     z: float
 
 class PointDetector:
-    def __init__(self, camera_id: int, manager: SyncManager, flags: ProcessFlags):
+    def __init__(self, camera_id: int, manager: SyncManager = None, flags: ProcessFlags = ProcessFlags()):
         self.camera_id = camera_id
         self.morph_kernel = np.array([[0, 1, 0],[1, 1, 1],[0, 1, 0]], np.uint8)
 
@@ -37,15 +37,26 @@ class PointDetector:
         self.output_queue = Queue(maxsize=10)
         self.viz_queue = Queue(maxsize=10)
 
+        # TODO: Move output queue to world reconstructor
+        # TODO: Move viz queue to collector
+        # Instead of having queue for each component, have a single queue for each type of data
+        # and have a single component responsible for routing data to the correct destination
+
+
         self._running = Event()
         self.track_process = None  # Initialize to None, will create when starting
         
         # Initialize timing stats with shared memory
-        self.timing_stats = manager.dict({
-            'undistort': manager.list(),
-            'point_detection': manager.list(),
-            'total_processing': manager.list()
-        })
+        if manager is None:
+
+            self.timing_stats = {}
+        else:
+            self.timing_stats = manager.dict({
+                'undistort': manager.list(),
+                'point_detection': manager.list(),
+                'total_processing': manager.list()
+            })
+
         self.max_stats_samples = 100  # Keep last 100 samples
 
         self.flags = flags  # Store the shared flags instance

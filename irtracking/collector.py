@@ -42,7 +42,7 @@ class OutputCollector:
             try:
                 ts, camera_ids, frames = self.frame_queues.get_nowait()
                 for camera_id, frame in zip(camera_ids, frames):
-                    rr.set_time_seconds("frame", ts)
+                    rr.set_time_seconds("timestamp", ts)
                     rr.log(f"cameras/camera{camera_id}/image", 
                           rr.Image(frame, color_model="BGR").compress(jpeg_quality=75))
                     #print(f"Frame {ts} logged")
@@ -58,14 +58,14 @@ class OutputCollector:
             for queue, camera_id in self.detector_queues:
                 try:
                     ts, cam_id, intrinsic, extrinsic, points, processed_frame = queue.get_nowait()
-                    rr.set_time_seconds("frame", ts)
+                    rr.set_time_seconds("timestamp", ts)
                     
                     # Update camera transform and frustum in 3D view
-                    rr.log(f"/cameras/camera{cam_id}",
+                    rr.log(f"cameras/camera{cam_id}",
                           rr.Transform3D(
                               translation=extrinsic.t.tolist(),
                               mat3x3=extrinsic.R.tolist(),
-                              from_parent=True
+                              from_parent=False
                           ))
                     
                     # Log camera intrinsics
@@ -73,7 +73,9 @@ class OutputCollector:
                           rr.Pinhole(
                               resolution=[640, 480],  # Adjust if your resolution is different
                               focal_length=[intrinsic.matrix[0,0], intrinsic.matrix[1,1]],
-                              principal_point=[intrinsic.matrix[0,2], intrinsic.matrix[1,2]]
+                              principal_point=[intrinsic.matrix[0,2], intrinsic.matrix[1,2]],
+                              camera_xyz=rr.ViewCoordinates.RUF,
+                              image_plane_distance=300
                           ))
                     
                     # Log processed frame with detected points
@@ -121,7 +123,7 @@ class OutputCollector:
         while self._running.is_set():
             try:
                 ts, intrinsics, extrinsics, world_points, epipolar_lines = self.world_queue.get_nowait()
-                rr.set_time_seconds("frame", ts)
+                rr.set_time_seconds("timestamp", ts)
                 
                 if world_points:
                     # Convert points to numpy array
@@ -131,17 +133,17 @@ class OutputCollector:
                     rr.log("world/points", 
                           rr.Points3D(
                               positions=points_array,
-                              radii=0.01,
+                              radii=15,
                               colors=[0.2, 0.8, 1.0, 1.0]
                           ))
                     
                     # Log point connections if there are multiple points
-                    if len(points_array) > 1:
-                        rr.log("world/connections",
-                              rr.LineStrips3D(
-                                  [points_array],
-                                  colors=[0.5, 0.5, 1.0, 0.5]
-                              ))
+                    # if len(points_array) > 1:
+                    #     rr.log("world/connections",
+                    #           rr.LineStrips3D(
+                    #               [points_array],
+                    #               colors=[0.5, 0.5, 1.0, 0.5]
+                    #           ))
                     
                 # Log epipolar lines
                 for epipolar_line in epipolar_lines:
@@ -293,12 +295,12 @@ class OutputCollector:
                 rrb.Vertical(
                     rrb.Spatial3DView(
                         name="world",
-                        origin="/"
+                        origin="/",
                     ),
                     rrb.Horizontal(
                         *[rrb.Spatial2DView(
                                 name=f"camera{i}",
-                                origin=f"/cameras/camera{i}"
+                                origin=f"cameras/camera{i}"
                             ) for i in range(self.num_cameras)],
                         column_shares=[1] * self.num_cameras
                     ),
@@ -309,16 +311,25 @@ class OutputCollector:
             # Initialize rerun
             rr.init("IR Tracking System", spawn=True, default_blueprint=blueprint)
             
+            rr.set_time_seconds("timestamp", time.time())
             # Setup world view coordinates
-            rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
+            rr.log("/", rr.ViewCoordinates.RUF, static=True)
             
             # Setup camera coordinate systems
             for i in range(self.num_cameras):
-                rr.log(f"cameras/camera{i}", rr.ViewCoordinates.RDF, static=True)  # Right-Down-Forward
+                rr.log(f"cameras/camera{i}", rr.ViewCoordinates.RUF, static=True)  # Right-Down-Forward
             
-            # Add world origin marker
+            rr.log("world", rr.ViewCoordinates.RUF, static=True)  # Set an up-axis
             rr.log("world/origin", rr.Transform3D(translation=[0, 0, 0]))
-            
+            rr.log("world/origin/xyz", rr.Arrows3D(
+                    origins=[[0, 0, 0], [0, 0, 0], [0, 0, 0]],
+                    vectors=[[50, 0, 0], [0, 50, 0], [0, 0, 50]],
+                    colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
+                    labels=["X", "Y", "Z"],
+                    show_labels=False
+                )
+            )
+
             self._initialized.set()
             
         except Exception as e:
