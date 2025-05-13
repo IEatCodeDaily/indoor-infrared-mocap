@@ -3,6 +3,7 @@ import numpy as np
 from .capture import PointDetector, Point2D, Point3D
 from .params import ExtrinsicParams, CameraParamsManager, IntrinsicParams, ProcessFlags
 from .objects import ObjectDetector
+from .sfm import fundamentalFromProjections
 from multiprocessing import Queue, Process, Event, cpu_count
 from multiprocessing.managers import SyncManager, BaseManager
 from queue import Empty, Full, LifoQueue       
@@ -245,7 +246,7 @@ def hungarian_partial_chains_correspondences(
             RT_B = np.c_[extrinsics[camB].R, extrinsics[camB].t]
             P_A = intrinsics[camA].matrix @ RT_A
             P_B = intrinsics[camB].matrix @ RT_B
-            F = cv2.sfm.fundamentalFromProjections(P_A, P_B)
+            F = fundamentalFromProjections(P_A, P_B)
             
             # For each point in camera A
             for idxA, ptA in enumerate(ptsA):

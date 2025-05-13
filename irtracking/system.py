@@ -19,13 +19,17 @@ from collections import deque
 
 class LocalizationSystem:
     def __init__(self,
-                 cameras: List[cv2.VideoCapture],
+                 cameras,
                  detectors: List[PointDetector],
                  output_collector: OutputCollector,
                  params_manager: CameraParamsManager,
                  manager: SyncManager,
                  flags: ProcessFlags = None,
-                 buffer_size: int = 30):
+                 buffer_size: int = 30,
+                 live_mode: bool = False):
+        """
+        cameras: List[cv2.VideoCapture] for video mode, pseyepy.Camera for live mode
+        """
         self.cameras = cameras
         self.detectors = detectors
         self.output_collector = output_collector
@@ -47,6 +51,7 @@ class LocalizationSystem:
         self.preloaded_frames = []
         self.current_frame_index = 0
         self.total_frames = 0
+        self.live_mode = live_mode
     
     def _preload_all_frames(self):
         """Preload all frames from all cameras into memory"""
@@ -98,72 +103,114 @@ class LocalizationSystem:
         return stats
     
     def _feed_loop(self):
-        """Feed preloaded frames to detectors."""
-        params = {}
-        for i in range(len(self.cameras)):
-            intrinsic = self.params_manager.get_intrinsic_params(i)
-            extrinsic = self.params_manager.get_extrinsic_params(i)
-            if intrinsic is None:
-                print(f"No intrinsic parameters for camera {i}")
-                continue
-            if extrinsic is None:
-                extrinsic = ExtrinsicParams(
-                    R=np.eye(3),
-                    t=np.zeros(3)
-                )
-            params[i] = (intrinsic, extrinsic)
-        
-        while self._running.is_set() and self.current_frame_index < len(self.preloaded_frames):
-            feed_start = time.time()
-            
-            frame_number, ts, frames = self.preloaded_frames[self.current_frame_index]
-            self.current_frame_index += 1
-            
-            if len(frames) != len(self.cameras):
-                print(f"Frame set incomplete: got {len(frames)}/{len(self.cameras)}")
-                continue
-            
-            for detector, frame, cam_id in zip(self.detectors, frames, range(len(frames))):
-                if detector.camera_id not in params:
+        if self.live_mode:
+            # Live mode: read from pseyepy.Camera
+            print("[LocalizationSystem] Entering live mode feed loop.")
+            params = {}
+            for i in range(self.cameras.num_cameras):
+                intrinsic = self.params_manager.get_intrinsic_params(i)
+                extrinsic = self.params_manager.get_extrinsic_params(i)
+                if intrinsic is None:
+                    print(f"No intrinsic parameters for camera {i}")
                     continue
-                intrinsic, extrinsic = params[detector.camera_id]
-                try:
-                    while detector.input_queue.qsize() > 10:
-                        try:
-                            detector.input_queue.get_nowait()
-                        except Empty:
-                            break
-                    detector.input_queue.put(
-                        (ts, detector.camera_id, intrinsic, extrinsic, frame, frame_number),
-                        timeout=0.1
+                if extrinsic is None:
+                    extrinsic = ExtrinsicParams(
+                        R=np.eye(3),
+                        t=np.zeros(3)
                     )
+                params[i] = (intrinsic, extrinsic)
+            frame_number = 0
+            while self._running.is_set():
+                feed_start = time.time()
+                frames, _ = self.cameras.read()
+                ts = time.time()
+                if frames is None or len(frames) != self.cameras.num_cameras:
+                    print(f"[LocalizationSystem] Live mode: got {len(frames) if frames is not None else 0}/{self.cameras.num_cameras} frames")
+                    continue
+                for detector, frame, cam_id in zip(self.detectors, frames, range(len(frames))):
+                    if detector.camera_id not in params:
+                        continue
+                    intrinsic, extrinsic = params[detector.camera_id]
+                    try:
+                        while detector.input_queue.qsize() > 10:
+                            try:
+                                detector.input_queue.get_nowait()
+                            except Empty:
+                                break
+                        detector.input_queue.put(
+                            (ts, detector.camera_id, intrinsic, extrinsic, frame, frame_number),
+                            timeout=0.1
+                        )
+                    except Full:
+                        print(f"PointDetector {detector.camera_id} input queue full")
+                try:
+                    self.output_collector.add_frame(ts, [detector.camera_id for detector in self.detectors], frames)
                 except Full:
-                    print(f"PointDetector {detector.camera_id} input queue full")
-            
-            try:
-                self.output_collector.add_frame(ts, [detector.camera_id for detector in self.detectors], frames)
-            except Full:
-                print("Visualization queue full")
-            
-            elapsed = time.time() - feed_start
-            if elapsed < self.frame_delay:
-                time.sleep(self.frame_delay - elapsed)
+                    print("Visualization queue full")
+                frame_number += 1
+                elapsed = time.time() - feed_start
+                if elapsed < self.frame_delay:
+                    time.sleep(self.frame_delay - elapsed)
+        else:
+            # Video mode: use preloaded frames
+            params = {}
+            for i in range(len(self.cameras)):
+                intrinsic = self.params_manager.get_intrinsic_params(i)
+                extrinsic = self.params_manager.get_extrinsic_params(i)
+                if intrinsic is None:
+                    print(f"No intrinsic parameters for camera {i}")
+                    continue
+                if extrinsic is None:
+                    extrinsic = ExtrinsicParams(
+                        R=np.eye(3),
+                        t=np.zeros(3)
+                    )
+                params[i] = (intrinsic, extrinsic)
+            while self._running.is_set() and self.current_frame_index < len(self.preloaded_frames):
+                feed_start = time.time()
+                frame_number, ts, frames = self.preloaded_frames[self.current_frame_index]
+                self.current_frame_index += 1
+                if len(frames) != len(self.cameras):
+                    print(f"Frame set incomplete: got {len(frames)}/{len(self.cameras)}")
+                    continue
+                for detector, frame, cam_id in zip(self.detectors, frames, range(len(frames))):
+                    if detector.camera_id not in params:
+                        continue
+                    intrinsic, extrinsic = params[detector.camera_id]
+                    try:
+                        while detector.input_queue.qsize() > 10:
+                            try:
+                                detector.input_queue.get_nowait()
+                            except Empty:
+                                break
+                        detector.input_queue.put(
+                            (ts, detector.camera_id, intrinsic, extrinsic, frame, frame_number),
+                            timeout=0.1
+                        )
+                    except Full:
+                        print(f"PointDetector {detector.camera_id} input queue full")
+                try:
+                    self.output_collector.add_frame(ts, [detector.camera_id for detector in self.detectors], frames)
+                except Full:
+                    print("Visualization queue full")
+                elapsed = time.time() - feed_start
+                if elapsed < self.frame_delay:
+                    time.sleep(self.frame_delay - elapsed)
     
     def start(self):
         """Start the system"""
         if self.feed_process is not None and self.feed_process.is_alive():
             print("LocalizationSystem is already running")
             return
-        
-        # Preload all frames first
-        if not self._preload_all_frames():
-            print("Failed to preload frames")
-            return
-        
+        if not self.live_mode:
+            # Preload all frames first for video mode
+            if not self._preload_all_frames():
+                print("Failed to preload frames")
+                return
         self._running.set()
         self.feed_process = Thread(target=self._feed_loop)
         self.feed_process.start()
-        print("System started with preloaded frames")
+        print("System started with {}".format("live camera feed" if self.live_mode else "preloaded frames"))
     
     def stop(self):
         """Stop the system"""

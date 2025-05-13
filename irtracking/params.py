@@ -142,6 +142,7 @@ class ProcessFlags:
         self.timing_stats = Event()
         self.debug_mode = Event()
         self.visualization_enabled = Event()
+        self.live_mode = Event()
         
     def set_flag(self, flag_name: str, state: bool):
         """Set a flag's state"""
