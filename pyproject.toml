@@ -18,6 +18,7 @@ h5py = "^3.12.1"
 ffmpeg-python = "^0.2.0"
 scipy = "^1.14.1"
 rerun-sdk = "^0.21.0"
+scikit-learn = "^1.6.1"
 
 
 [tool.poetry.group.dev]
@@ -29,11 +30,6 @@ jupyter = "^1.1.1"
 ipywidgets = "7.7.1"
 ipyvtklink = "0.2.3"
 panel = "^1.5.4"
-trame = "^3.7.1"
-trame-client = "^3.5.0"
-trame-server = "^3.2.3"
-trame-vtk = "^2.8.12"
-trame-vuetify = "^2.7.2"
 pytest = "^8.3.4"
 
 [tool.pytest.ini_options]

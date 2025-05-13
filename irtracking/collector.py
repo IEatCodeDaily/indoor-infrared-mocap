@@ -2,8 +2,8 @@ from typing import List
 import time
 import rerun as rr
 import rerun.blueprint as rrb
-from queue import Empty, Full
-from multiprocessing import Queue, Process, Event
+from queue import Full, Empty
+from multiprocessing import Queue, Process, Event, Pool
 import threading
 import numpy as np
 from .capture import PointDetector
@@ -11,6 +11,11 @@ from .world import WorldReconstructor
 from .objects import ObjectDetector
 from .params import ProcessFlags
 from multiprocessing.managers import SyncManager
+import os
+from scipy.spatial.transform import Rotation
+
+# TODO:
+# - Rewrite how visualization work: have 1 type of process that can handle all types of data with 1 queue. Each queue entry will contain the type of data and the data itself.
 
 class OutputCollector:
     def __init__(self, detectors: List[PointDetector],
@@ -26,14 +31,24 @@ class OutputCollector:
         
         # Add frame queues from system
         # frame_queues: (timestamp, camera_ids, frames)
-        self.frame_queues = Queue(maxsize=3)
+        self.frame_queues = Queue(maxsize=32)  # Increased from 8 to 32
+        # Max size increased to handle more frames before dropping
         
         # Setup process control
         self._running = Event()
         self._initialized = Event()
-        self.collect_process = None  # Initialize to None, will create when starting
-        self.flags = flags  # Store the shared flags instance
+        self.collect_process = None
+        self.flags = flags or ProcessFlags()
         
+        # Add rate limiting
+        self.last_frame_time = time.time()
+        self.min_frame_interval = 1.0 / 30.0  # Maximum 30 fps for visualization
+        
+        # Frame processing pool
+        self.frame_pool = None
+        self.num_frame_processors = len(detectors)
+        
+
     @rr.shutdown_at_exit
     def _frame_collection_loop(self):
         rr.init("IR Tracking System")
@@ -51,70 +66,88 @@ class OutputCollector:
                 pass
 
     @rr.shutdown_at_exit
-    def _detector_collection_loop(self):
+    def _detector_collection_loop(self, detector_queue: Queue, camera_id: int):
         rr.init("IR Tracking System")
         rr.connect_tcp()
         while self._running.is_set():
-            for queue, camera_id in self.detector_queues:
-                try:
-                    ts, cam_id, intrinsic, extrinsic, points, processed_frame = queue.get_nowait()
-                    rr.set_time_seconds("timestamp", ts)
+            try:
+                ts, cam_id, intrinsic, extrinsic, points, confidences, processed_frame, frame_number = detector_queue.get_nowait()
+                rr.set_time_seconds("timestamp", ts)
+                
+                quat_xyzw = Rotation.from_matrix(extrinsic.R.T).as_quat()
+
+                # Update camera transform and frustum in 3D view
+                rr.log(f"cameras/camera{cam_id}",
+                        rr.Transform3D(
+                            translation=-np.matmul(extrinsic.R.T, extrinsic.t).flatten(),
+                            rotation=rr.Quaternion(xyzw=quat_xyzw),
+                            from_parent=False
+                        ))
+                
+                # Log camera intrinsics
+                rr.log(f"cameras/camera{cam_id}",
+                        rr.Pinhole(
+                            resolution=[640, 480],  # Adjust if your resolution is different
+                            focal_length=[intrinsic.matrix[0,0], intrinsic.matrix[1,1]],
+                            principal_point=[intrinsic.matrix[0,2], intrinsic.matrix[1,2]],
+                            image_plane_distance=300
+                        ))
+                
+                if len(points) > 0:
+                    # Points are already in numpy array format
+                    points_array = points
                     
-                    # Update camera transform and frustum in 3D view
-                    rr.log(f"cameras/camera{cam_id}",
-                          rr.Transform3D(
-                              translation=extrinsic.t.tolist(),
-                              mat3x3=extrinsic.R.tolist(),
-                              from_parent=False
-                          ))
+                    # Normalize confidences
+                    if len(confidences) > 0:
+                        conf_min = confidences.min()
+                        conf_max = confidences.max()
+                        if conf_max > conf_min:
+                            confidences = (confidences - conf_min) / (conf_max - conf_min)
+                        else:
+                            confidences = np.ones_like(confidences)
                     
-                    # Log camera intrinsics
-                    rr.log(f"cameras/camera{cam_id}",
-                          rr.Pinhole(
-                              resolution=[640, 480],  # Adjust if your resolution is different
-                              focal_length=[intrinsic.matrix[0,0], intrinsic.matrix[1,1]],
-                              principal_point=[intrinsic.matrix[0,2], intrinsic.matrix[1,2]],
-                              camera_xyz=rr.ViewCoordinates.RUF,
-                              image_plane_distance=300
-                          ))
+                    # Create color array based on confidence
+                    colors = np.column_stack([
+                        1.0 - confidences,  # Red channel
+                        confidences,        # Green channel
+                        np.zeros_like(confidences),  # Blue channel
+                        np.ones_like(confidences)    # Alpha channel
+                    ])
                     
-                    # Log processed frame with detected points
-                    # rr.log(f"cameras/camera{cam_id}/processed", 
-                    #       rr.Image(processed_frame, color_model="BGR").compress(jpeg_quality=75))
+                    # Log 2D points with confidence-based coloring
+                    rr.log(f"cameras/camera{cam_id}/keypoints", 
+                            rr.Points2D(
+                                positions=points_array,
+                                radii=2,
+                                colors=colors
+                            ))
                     
-                    if points:
-                        # Convert points to numpy array for easier handling
-                        points_array = np.array([[p[0].x, p[0].y] for p in points])
-                        confidences = np.array([p[1] for p in points])
+                    # --- 3D projection rays visualization ---
+                    camera_center = -np.matmul(extrinsic.R.T, extrinsic.t).flatten()
+                    line_segments = []
+                    for pt in points_array:
+                        pt_hom = np.array([pt[0], pt[1], 1.0])
+                        ray_dir = np.matmul(extrinsic.R.T, np.matmul(np.linalg.inv(intrinsic.matrix), pt_hom))
+                        ray_dir = ray_dir / np.linalg.norm(ray_dir)
+                        end_point = camera_center + 10000 * ray_dir  # Lengthen as needed
+                        line_segments.append([camera_center.tolist(), end_point.tolist()])
+                    if line_segments:
+                        rr.log(f"world/projection_rays/camera{cam_id}",
+                               rr.LineStrips3D(
+                                   line_segments,
+                                   colors=[1.0, 0.5, 0.0, 0.5],  # Orange, semi-transparent
+                                   radii=1.5
+                               ))
+                else:
+                    # Clear rays if no points
+                    rr.log(f"cameras/camera{cam_id}/projection_rays", rr.LineStrips3D([], colors=[]))
+                
+            except Empty:
+                continue  # Move to next camera when queue is empty
                         
-                        # Normalize confidences
-                        if len(confidences) > 0:
-                            conf_min = confidences.min()
-                            conf_max = confidences.max()
-                            if conf_max > conf_min:
-                                confidences = (confidences - conf_min) / (conf_max - conf_min)
-                            else:
-                                confidences = np.ones_like(confidences)
-                        
-                        # Create color array based on confidence
-                        colors = np.column_stack([
-                            1.0 - confidences,  # Red channel
-                            confidences,        # Green channel
-                            np.zeros_like(confidences),  # Blue channel
-                            np.ones_like(confidences)    # Alpha channel
-                        ])
-                        
-                        # Log 2D points with confidence-based coloring
-                        rr.log(f"cameras/camera{cam_id}/keypoints", 
-                              rr.Points2D(
-                                  positions=points_array,
-                                  radii=2,
-                                  colors=colors
-                              ))
-                        
-                except Empty:
-                    #print("Detector queue is empty")
-                    pass
+            # Add a small sleep to prevent CPU overload
+            #time.sleep(0.001)
+
 
     @rr.shutdown_at_exit
     def _world_collection_loop(self):
@@ -129,47 +162,69 @@ class OutputCollector:
                     # Convert points to numpy array
                     points_array = np.array([[p.x, p.y, p.z] for p in world_points])
                     
+                    # Calculate relative z heights and normalize to 0-1 range
+                    z_heights = points_array[:, 2]  # Get z coordinates
+                    z_min = z_heights.min()
+                    z_max = z_heights.max()
+                    if z_max > z_min:
+                        z_normalized = (z_heights - z_min) / (z_max - z_min)
+                    else:
+                        z_normalized = np.ones_like(z_heights)
+                        
+                    # Create color array based on relative height
+                    # Blue (cold) for low points to red (hot) for high points
+                    colors = np.column_stack([
+                        z_normalized,        # Red increases with height
+                        np.zeros_like(z_normalized),  # Green fixed at 0
+                        1.0 - z_normalized,  # Blue decreases with height
+                        np.ones_like(z_normalized)    # Alpha fixed at 1
+                    ])
+                    
                     # Log 3D points
                     rr.log("world/points", 
                           rr.Points3D(
                               positions=points_array,
                               radii=15,
-                              colors=[0.2, 0.8, 1.0, 1.0]
+                              colors=colors
                           ))
                     
-                    # Log point connections if there are multiple points
-                    # if len(points_array) > 1:
-                    #     rr.log("world/connections",
-                    #           rr.LineStrips3D(
-                    #               [points_array],
-                    #               colors=[0.5, 0.5, 1.0, 0.5]
-                    #           ))
+                else:
+                    # empty world points
+                    rr.log("world/points", rr.Points3D(positions=[], radii=[], colors=[]))
                     
-                # Log epipolar lines
-                for epipolar_line in epipolar_lines:
-                    cam_id = epipolar_line.camera_id
-                    line = epipolar_line.line
+                # # Log epipolar lines as 3D rays
+                # if epipolar_lines:
+                #     # Create line segments for each epipolar line
+                #     line_segments = []
+                #     for epipolar_line in epipolar_lines:
+                #         # Get camera center and calculate ray direction
+                #         cam_id = epipolar_line.camera_id
+                #         camera_center = -np.matmul(extrinsics[cam_id].R.T, extrinsics[cam_id].t).flatten()
+                        
+                #         # Convert 2D point to 3D ray direction
+                #         pt_hom = np.array([epipolar_line.point_2d[0], epipolar_line.point_2d[1], 1.0])
+                #         ray_dir = np.matmul(extrinsics[cam_id].R.T, 
+                #                           np.matmul(np.linalg.inv(intrinsics[cam_id].matrix), pt_hom))
+                #         ray_dir = ray_dir / np.linalg.norm(ray_dir)
+                        
+                #         # Create line segment from camera center
+                #         end_point = camera_center + 10000 * ray_dir
+                #         line_segments.append([camera_center.tolist(), end_point.tolist()])
                     
-                    # Create points along the epipolar line
-                    x = np.linspace(0, 640, 100)  # Adjust range based on image width
-                    y = (-line[2] - line[0] * x) / line[1]
-                    
-                    # Filter points within image bounds
-                    mask = (y >= 0) & (y < 480)  # Adjust based on image height
-                    x = x[mask]
-                    y = y[mask]
-                    
-                    if len(x) > 0:
-                        points = np.column_stack([x, y])
-                        rr.log(f"cameras/camera{cam_id}/epipolar_lines",
-                              rr.LineStrips2D(
-                                  [points],
-                                  colors=[1.0, 0.5, 0.0, 0.5]  # Orange, semi-transparent
-                              ))
+                #     # Log all epipolar lines
+                #     rr.log("world/epipolar_lines",
+                #           rr.LineStrips3D(
+                #               line_segments,
+                #               colors=[1.0, 0.5, 0.0, 0.5],  # Orange, semi-transparent
+                #               radii=0.1
+                #           ))
+                # else:
+                #     # Clear epipolar lines if none exist
+                #     rr.log("world/epipolar_lines", rr.LineStrips3D([], colors=[]))
                     
             except Empty:
-                #print("World queue is empty")
                 pass
+                
         
     @rr.shutdown_at_exit
     def _object_collection_loop(self):
@@ -179,7 +234,7 @@ class OutputCollector:
         while self._running.is_set():
             try:
                 ts, detected_objects = self.object_queue.get_nowait()
-                rr.set_time_seconds("world", ts)
+                rr.set_time_seconds("timestamp", ts)
                 
                 for i, obj in enumerate(detected_objects):
                     # Draw object center and heading
@@ -193,8 +248,8 @@ class OutputCollector:
                     # Draw heading arrow
                     heading_length = 0.1  # 10cm arrow
                     heading_end = obj.position + heading_length * np.array([
-                        np.cos(obj.rotation),
-                        np.sin(obj.rotation),
+                        np.cos(obj.rotation[0]),
+                        np.sin(obj.rotation[0]),
                         0
                     ])
                     
@@ -213,23 +268,26 @@ class OutputCollector:
                               colors=[1.0, 0.2, 0.2, 1.0]  # Red
                           ))
                     
-                    # Draw connections between LEDs
-                    rr.log(f"world/objects/{obj.obj.name}_{i}/connections",
-                          rr.LineStrips3D(
-                              [led_positions],
-                              colors=[1.0, 0.2, 0.2, 0.5]  # Semi-transparent red
+                    # Draw confidence indicator
+                    confidence_radius = 0.05 * obj.confidence  # Scale radius by confidence
+                    rr.log(f"world/objects/{obj.obj.name}_{i}/confidence",
+                          rr.Points3D(
+                              positions=[obj.position.tolist()],
+                              radii=confidence_radius,
+                              colors=[1.0, 1.0, 0.2, 0.3]  # Semi-transparent yellow
                           ))
                     
-                    # Add object info text
-                    rr.log(f"world/objects/{obj.obj.name}_{i}/info",
-                          rr.Text(
-                              f"{obj.obj.name}\nconf: {obj.confidence:.2f}",
-                              position=obj.position.tolist()
-                          ))
-                    
+                    # Draw velocity vector if available
+                    if hasattr(obj, 'velocity'):
+                        velocity_end = obj.position + obj.velocity
+                        rr.log(f"world/objects/{obj.obj.name}_{i}/velocity",
+                              rr.LineStrips3D(
+                                  [[obj.position.tolist(), velocity_end.tolist()]],
+                                  colors=[0.2, 0.2, 1.0, 0.8]  # Semi-transparent blue
+                              ))
+                
             except Empty:
-                #print("Object queue is empty")
-                pass
+                time.sleep(0.001)  # Small sleep to prevent busy waiting
 
     def start(self):
         """Start the output collection process"""
@@ -256,9 +314,49 @@ class OutputCollector:
         self._running.clear()
         self._initialized.clear()
         
+        # Clean up frame pool if it exists
+        if self.frame_pool:
+            self.frame_pool.close()
+            self.frame_pool.join()
+            self.frame_pool = None
+        
         if self.collect_process is not None:
-            self.collect_process.join()
-            self.collect_process = None  # Clear the process reference
+            # First terminate the main process
+            self.collect_process.terminate()
+            self.collect_process.join(timeout=5.0)
+            
+            # Force kill if still running
+            if self.collect_process.is_alive():
+                self.collect_process.kill()
+                self.collect_process.join(timeout=1.0)
+                
+            self.collect_process = None
+            
+        # Clear all queues to prevent blocking
+        for queue, _ in self.detector_queues:
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                except Empty:
+                    break
+                    
+        while not self.world_queue.empty():
+            try:
+                self.world_queue.get_nowait()
+            except Empty:
+                break
+                
+        while not self.object_queue.empty():
+            try:
+                self.object_queue.get_nowait()
+            except Empty:
+                break
+                
+        while not self.frame_queues.empty():
+            try:
+                self.frame_queues.get_nowait()
+            except Empty:
+                break
 
     @rr.shutdown_at_exit
     def _collect_loop(self):
@@ -267,12 +365,19 @@ class OutputCollector:
         self._setup_rerun()
         
         # Initialize processes
-        processes = [
-            Process(target=self._frame_collection_loop),
-            Process(target=self._detector_collection_loop),
+        processes = []
+        # Create multiple frame collection processes (one per camera)
+        for _ in range(self.num_cameras):
+            processes.append(Process(target=self._frame_collection_loop))
+        
+        for queue, camera_id in self.detector_queues:
+            processes.append(Process(target=self._detector_collection_loop, args=(queue, camera_id)))
+        
+        # Add other collection processes
+        processes.extend([
             Process(target=self._world_collection_loop),
             Process(target=self._object_collection_loop)
-        ]
+        ])
         
         # Start the processes
         for process in processes:
@@ -280,7 +385,7 @@ class OutputCollector:
             
         # Keep main process alive and wait for child processes
         while self._running.is_set():
-            time.sleep(0.4)
+            time.sleep(0.1)  # Reduced sleep time for more responsive cleanup
             
         # Clean up processes
         for process in processes:
@@ -296,6 +401,7 @@ class OutputCollector:
                     rrb.Spatial3DView(
                         name="world",
                         origin="/",
+                        
                     ),
                     rrb.Horizontal(
                         *[rrb.Spatial2DView(
@@ -313,13 +419,13 @@ class OutputCollector:
             
             rr.set_time_seconds("timestamp", time.time())
             # Setup world view coordinates
-            rr.log("/", rr.ViewCoordinates.RUF, static=True)
+            rr.log("/", rr.ViewCoordinates.RBU, static=True)
             
             # Setup camera coordinate systems
             for i in range(self.num_cameras):
-                rr.log(f"cameras/camera{i}", rr.ViewCoordinates.RUF, static=True)  # Right-Down-Forward
+                rr.log(f"cameras/camera{i}", rr.ViewCoordinates.RDF, static=True)  # Right-Down-Forward
             
-            rr.log("world", rr.ViewCoordinates.RUF, static=True)  # Set an up-axis
+            rr.log("world", rr.ViewCoordinates.RBU, static=True)  # Set an up-axis
             rr.log("world/origin", rr.Transform3D(translation=[0, 0, 0]))
             rr.log("world/origin/xyz", rr.Arrows3D(
                     origins=[[0, 0, 0], [0, 0, 0], [0, 0, 0]],
@@ -338,7 +444,15 @@ class OutputCollector:
 
     def add_frame(self, ts: float, camera_ids: List[int], frames: List[np.ndarray]):
         """Add frames to the visualization queue"""
+        current_time = time.time()
+        # Rate limit the visualization
+        if current_time - self.last_frame_time < self.min_frame_interval:
+            return None
+            
         try:
             self.frame_queues.put_nowait((ts, camera_ids, frames))
+            self.last_frame_time = current_time
         except Full:
-            pass    
+            print("Dropping frame due to visualization queue full")
+            return Full    
+

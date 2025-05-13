@@ -1,16 +1,21 @@
-from typing import List
+from typing import List, Dict, Tuple
 from .capture import PointDetector
-from .params import CameraParamsManager, ExtrinsicParams
+from .params import CameraParamsManager, ExtrinsicParams, ProcessFlags
 from .collector import OutputCollector
 from pathlib import Path
 import cv2
 import time
 from threading import Thread, Event
-import queue
+from queue import Full, Empty
 from multiprocessing import Queue
 from multiprocessing.managers import SyncManager
 import numpy as np
+from collections import deque
 #from pseyepy import Camera
+
+# TODO:
+# - Add pseyepy
+# - tidy up everything and aggregate all localization systems into one
 
 class LocalizationSystem:
     def __init__(self,
@@ -18,31 +23,69 @@ class LocalizationSystem:
                  detectors: List[PointDetector],
                  output_collector: OutputCollector,
                  params_manager: CameraParamsManager,
-                 manager: SyncManager):
+                 manager: SyncManager,
+                 flags: ProcessFlags = None,
+                 buffer_size: int = 30):
         self.cameras = cameras
         self.detectors = detectors
         self.output_collector = output_collector
         self.params_manager = params_manager
         self._running = Event()
-        self.frame_delay = 0.03  # 30ms default delay
-        self.feed_process = None  # Initialize to None, will create when starting
-        
+        self.frame_delay = 0.01  # 10ms default delay
+        self.feed_process = None
+        self.flags = flags or ProcessFlags()  # Use provided flags or create new ones
+        self.frame_counter = 0  # Single frame counter for all cameras
         # Initialize timing stats with shared memory
         self.timing_stats = manager.dict({
             'frame_capture': manager.list(),
             'param_fetch': manager.list(),
-            'total_feed': manager.list()
+            'total_feed': manager.list(),
+            'buffer_wait': manager.list()
         })
-        self.max_stats_samples = 100  # Keep last 100 samples
+        self.max_stats_samples = 100
+        # New attributes for preloaded frames
+        self.preloaded_frames = []
+        self.current_frame_index = 0
+        self.total_frames = 0
     
+    def _preload_all_frames(self):
+        """Preload all frames from all cameras into memory"""
+        print("Preloading all frames...")
+        self.preloaded_frames = []
+        self.current_frame_index = 0
+        
+        # Get total frames from first camera (assuming all videos have same length)
+        self.total_frames = int(self.cameras[0].get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        for frame_idx in range(self.total_frames):
+            frames = []
+            for camera in self.cameras:
+                ret, frame = camera.read()
+                if not ret:
+                    print(f"Failed to read frame {frame_idx} from a camera")
+                    return False
+                frames.append(frame)
+            self.preloaded_frames.append((frame_idx, time.time(), frames))
+        
+        print(f"Successfully preloaded {len(self.preloaded_frames)} frames")
+        return True
+
     def _update_timing(self, category: str, duration: float):
         """Update timing statistics for a category"""
-        self.timing_stats[category].append(duration)
-        if len(self.timing_stats[category]) > self.max_stats_samples:
-            self.timing_stats[category].pop(0)
+        if not self.flags.get_flag('timing_stats'):
+            return
+        
+        stats_list = self.timing_stats[category]
+        stats_list.append(duration)
+        if len(stats_list) > self.max_stats_samples:
+            stats_list.pop(0)
+        self.timing_stats[category] = stats_list  # Update the shared dict
     
     def get_timing_stats(self):
         """Get average timing statistics"""
+        if not self.flags.get_flag('timing_stats'):
+            return {}
+        
         stats = {}
         for category, times in self.timing_stats.items():
             if times:
@@ -54,131 +97,84 @@ class LocalizationSystem:
                 }
         return stats
     
+    def _feed_loop(self):
+        """Feed preloaded frames to detectors."""
+        params = {}
+        for i in range(len(self.cameras)):
+            intrinsic = self.params_manager.get_intrinsic_params(i)
+            extrinsic = self.params_manager.get_extrinsic_params(i)
+            if intrinsic is None:
+                print(f"No intrinsic parameters for camera {i}")
+                continue
+            if extrinsic is None:
+                extrinsic = ExtrinsicParams(
+                    R=np.eye(3),
+                    t=np.zeros(3)
+                )
+            params[i] = (intrinsic, extrinsic)
+        
+        while self._running.is_set() and self.current_frame_index < len(self.preloaded_frames):
+            feed_start = time.time()
+            
+            frame_number, ts, frames = self.preloaded_frames[self.current_frame_index]
+            self.current_frame_index += 1
+            
+            if len(frames) != len(self.cameras):
+                print(f"Frame set incomplete: got {len(frames)}/{len(self.cameras)}")
+                continue
+            
+            for detector, frame, cam_id in zip(self.detectors, frames, range(len(frames))):
+                if detector.camera_id not in params:
+                    continue
+                intrinsic, extrinsic = params[detector.camera_id]
+                try:
+                    while detector.input_queue.qsize() > 10:
+                        try:
+                            detector.input_queue.get_nowait()
+                        except Empty:
+                            break
+                    detector.input_queue.put(
+                        (ts, detector.camera_id, intrinsic, extrinsic, frame, frame_number),
+                        timeout=0.1
+                    )
+                except Full:
+                    print(f"PointDetector {detector.camera_id} input queue full")
+            
+            try:
+                self.output_collector.add_frame(ts, [detector.camera_id for detector in self.detectors], frames)
+            except Full:
+                print("Visualization queue full")
+            
+            elapsed = time.time() - feed_start
+            if elapsed < self.frame_delay:
+                time.sleep(self.frame_delay - elapsed)
+    
     def start(self):
         """Start the system"""
-        if self.feed_process is not None:
-            # If thread exists but is not alive, clean it up
-            if not self.feed_process.is_alive():
-                self.feed_process.join()
-            else:
-                print("LocalizationSystem is already running")
-                return
-                
-        # Create new thread
+        if self.feed_process is not None and self.feed_process.is_alive():
+            print("LocalizationSystem is already running")
+            return
+        
+        # Preload all frames first
+        if not self._preload_all_frames():
+            print("Failed to preload frames")
+            return
+        
         self._running.set()
         self.feed_process = Thread(target=self._feed_loop)
         self.feed_process.start()
+        print("System started with preloaded frames")
     
     def stop(self):
         """Stop the system"""
         self._running.clear()
-        
         if self.feed_process is not None:
             self.feed_process.join()
-            self.feed_process = None  # Clear the thread reference
+            self.feed_process = None
+        # Clear preloaded frames to free memory
+        self.preloaded_frames = []
+        self.current_frame_index = 0
     
-    def set_frame_delay(self, delay: float):
-        """Set the delay between frames in seconds"""
-        self.frame_delay = delay
-    
-    def _feed_loop(self):
-        """Continuously feed frames from video sources to detectors"""
-        last_ts = 0
-        while self._running.is_set():
-            feed_start = time.time()
-            
-            # Read frames from all cameras
-            capture_start = time.time()
-            frames = []
-            ts = time.time()
-            camera_ids = []
-            
-            # Only proceed if we can read from all cameras
-            all_frames_read = True
-            for i, camera in enumerate(self.cameras):
-                ret, frame = camera.read()
-                if not ret:
-                    # If we reach the end of any video, reset all videos
-                    print(f"Resetting videos to start (camera {i} reached end)")
-                    for cam in self.cameras:
-                        cam.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    all_frames_read = False
-                    break
-                frames.append(frame)
-                camera_ids.append(i)
-            
-            if not all_frames_read:
-                continue
-                
-            self._update_timing('frame_capture', time.time() - capture_start)
-
-            # If we have frames from all cameras, feed them to detectors
-            if len(frames) == len(self.cameras):
-                # Get camera parameters once for all cameras
-                param_start = time.time()
-                params = {}
-                for i in range(len(self.cameras)):
-                    intrinsic = self.params_manager.get_intrinsic_params(i)
-                    extrinsic = self.params_manager.get_extrinsic_params(i)
-                    
-                    if intrinsic is None:
-                        print(f"No intrinsic parameters for camera {i}")
-                        continue
-                        
-                    # Extrinsic parameters might be None for some cameras
-                    if extrinsic is None:
-                        extrinsic = ExtrinsicParams(
-                            R=np.eye(3),
-                            t=np.zeros(3)
-                        )
-                    params[i] = (intrinsic, extrinsic)
-                    
-                self._update_timing('param_fetch', time.time() - param_start)
-
-                # Send frames to all detectors simultaneously
-                for detector, frame in zip(self.detectors, frames):
-                    if detector.camera_id not in params:
-                        continue
-                        
-                    intrinsic, extrinsic = params[detector.camera_id]
-                    
-                    try:
-                        # Try to clear old frames from input queue
-                        while True:
-                            try:
-                                detector.input_queue.get_nowait()
-                            except queue.Empty:
-                                break
-                                
-                        # Send timestamp, camera ID, parameters, and frame
-                        detector.input_queue.put(
-                            (ts, detector.camera_id, intrinsic, extrinsic, frame),
-                            timeout=0.1
-                        )
-                    except queue.Full:
-                        print(f"PointDetector {detector.camera_id} input queue full")
-                
-                self._update_timing('total_feed', time.time() - feed_start)
-
-                # Send frames to visualization queue
-                try:
-                    # Clear old frames from visualization queue
-                    while True:
-                        try:
-                            self.output_collector.frame_queues.get_nowait()
-                        except queue.Empty:
-                            break
-                            
-                    self.output_collector.add_frame(ts, camera_ids, frames)
-                except queue.Full:
-                    print("Visualization queue full")
-                    
-
-            # Maintain frame rate
-            elapsed = time.time() - feed_start
-            if elapsed < self.frame_delay:
-                time.sleep(self.frame_delay - elapsed)
-
     def start_all(self, video_sources: List[str]):
         """Start all cameras with their respective video sources"""
         if len(video_sources) != len(self.detectors):

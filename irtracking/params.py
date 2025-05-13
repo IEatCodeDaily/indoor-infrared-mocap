@@ -104,18 +104,13 @@ class CameraParamsManager:
         path = self.config_dir / filename
         data = []
         
-        # Load existing parameters if file exists
-        if path.exists():
-            with path.open('r') as f:
-                data = json.load(f)
-        
-        # Update parameters
+        # Create data list from current parameters
         for camera_id, params in self.intrinsic.items():
             cam_data = params.to_dict()
             cam_data['camera_id'] = camera_id
             data.append(cam_data)
         
-        # Save to file
+        # Save to file (overwriting any existing content)
         with path.open('w') as f:
             json.dump(data, f, indent=4)
     
@@ -124,18 +119,13 @@ class CameraParamsManager:
         path = self.config_dir / filename
         data = []
         
-        # Load existing parameters if file exists
-        if path.exists():
-            with path.open('r') as f:
-                data = json.load(f)
-        
-        # Update parameters
+        # Create data list from current parameters
         for camera_id, params in self.extrinsic.items():
             cam_data = params.to_dict()
             cam_data['camera_id'] = camera_id
             data.append(cam_data)
         
-        # Save to file
+        # Save to file (overwriting any existing content)
         with path.open('w') as f:
             json.dump(data, f, indent=4)
     
@@ -149,7 +139,7 @@ class CameraParamsManager:
 
 class ProcessFlags:
     def __init__(self):
-        self.timing_enabled = Event()
+        self.timing_stats = Event()
         self.debug_mode = Event()
         self.visualization_enabled = Event()
         

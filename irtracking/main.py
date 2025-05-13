@@ -31,7 +31,8 @@ class TrackingGUI:
         
         # Initialize system components
         self.params_manager = CameraParamsManager()
-        self.object_manager = ObjectManager()
+        base_path = Path(os.path.dirname(os.path.dirname(__file__)))
+        self.object_manager = ObjectManager(config_path=base_path / "config" / "objects.json")
         
         # Get video sources from calibration footage
         base_path = Path(os.path.dirname(os.path.dirname(__file__))) / "footage_calibration"
@@ -52,7 +53,7 @@ class TrackingGUI:
         
         # Create shared flags using the manager
         self.process_flags = ProcessFlags()
-        self.process_flags.timing_enabled.clear() # Initialize to False
+        self.process_flags.timing_stats.clear() # Initialize to False
         
         # Initialize components and share the SAME flags instance
         self.detectors = [
@@ -62,24 +63,23 @@ class TrackingGUI:
         self.world_reconstructor = WorldReconstructor(self.detectors, self.manager, flags=self.process_flags)
         self.object_detector = ObjectDetector(self.object_manager, self.manager, flags=self.process_flags)
         
-        # No need to set flags separately, they're already shared!
-        
-        # Create system components with shared manager
+        # Create system components with shared manager and flags
         self.output_collector = OutputCollector(
             detectors=self.detectors,
             world_reconstructor=self.world_reconstructor,
             object_detector=self.object_detector,
-            manager=self.manager
+            manager=self.manager,
+            flags=self.process_flags
         )
-
         
-        # Create localization system
+        # Create localization system with flags
         self.system = LocalizationSystem(
             cameras=self.cameras,
             detectors=self.detectors,
             output_collector=self.output_collector,
             params_manager=self.params_manager,
-            manager=self.manager
+            manager=self.manager,
+            flags=self.process_flags
         )
         
         # Initialize timing update
@@ -109,7 +109,7 @@ class TrackingGUI:
         
         # Add video controls
         ttk.Label(settings_frame, text="Frame delay (ms):").grid(row=0, column=0, padx=5)
-        self.delay_var = tk.StringVar(value="30")
+        self.delay_var = tk.StringVar(value="10")
         delay_entry = ttk.Entry(settings_frame, textvariable=self.delay_var, width=10)
         delay_entry.grid(row=0, column=1, padx=5)
         
@@ -142,7 +142,7 @@ class TrackingGUI:
         self.timing_enabled_var.set(not enabled)  # Toggle the GUI variable
         
         # This single call will affect ALL processes
-        self.process_flags.set_flag('timing_enabled', not enabled)
+        self.process_flags.set_flag('timing_stats', not enabled)
         
         if not enabled:  # If we're enabling stats
             self.timing_frame.grid(row=3, column=0, columnspan=2, pady=10, sticky=(tk.W, tk.E))
@@ -153,7 +153,7 @@ class TrackingGUI:
             
     def update_timing_stats(self):
         """Update timing statistics display"""
-        if not self.timing_update_running or not self.flags.timing_enabled:
+        if not self.timing_update_running or not self.process_flags.get_flag("timing_stats"):
             return
             
 
@@ -217,7 +217,6 @@ class TrackingGUI:
             print("Failed to start output collector")
             return
         
-
         # Wait for output collector to initialize
         while not self.output_collector._initialized.is_set():
             time.sleep(0.1)
@@ -230,18 +229,16 @@ class TrackingGUI:
         
         print("Detectors initialized")
 
-        # Start world reconstructor
-        self.world_reconstructor.start()
-        
-        print("World reconstructor initialized")
-
-        # Start object detector
+        # Start object detector first
         self.object_detector.start()
-        
         print("Object detector initialized")
 
-        # Connect world reconstructor to object detector
-        self.world_reconstructor.object_detector = self.object_detector
+        # Connect world reconstructor to object detector BEFORE starting it
+        self.world_reconstructor.object_detector_queue = self.object_detector.input_queue
+        
+        # Now start world reconstructor
+        self.world_reconstructor.start()
+        print("World reconstructor initialized")
         
         # Start the localization system (which will feed frames with parameters)
         self.system.start()

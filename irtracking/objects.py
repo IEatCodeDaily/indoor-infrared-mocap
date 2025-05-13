@@ -10,6 +10,8 @@ from queue import Empty, Full
 from .capture import Point3D
 from .params import ProcessFlags
 import time
+import cv2
+
 # Objects dataclass
 @dataclass
 class Obj:
@@ -18,6 +20,7 @@ class Obj:
     dimensions: int
     metadata: Dict[str, Any]
     points: np.ndarray  # contains 2D or 3D points
+    type: str
     
     @classmethod
     def from_dict(cls, data: Dict) -> 'Obj':
@@ -26,7 +29,8 @@ class Obj:
             type=data['type'],
             dimensions=data['dimensions'],
             metadata=data['metadata'],
-            points=np.array(data['points'], dtype=np.float64)
+            points=np.array(data['points'], dtype=np.float64),
+            type=data['type']
         )
     
     def to_dict(self) -> Dict:
@@ -35,14 +39,15 @@ class Obj:
             'type': self.type,
             'dimensions': self.dimensions,
             'metadata': self.metadata,
-            'points': self.points.tolist()
+            'points': self.points.tolist(),
+            'type': self.type
         }
 
 @dataclass
 class DetectedObject:
     obj: Obj
-    position: np.ndarray  # Center position [x, y, z]
-    rotation: float      # Rotation around vertical axis (heading)
+    position: List[float]  # Center position [x, y, z]
+    rotation: List[float]  # Rotation [x, y, z]
     confidence: float    # Detection confidence [0-1]
     led_points: List[Point3D]  # Detected LED points
 
@@ -50,10 +55,12 @@ class ObjectManager:
     def __init__(self, config_path: Path = Path("config/objects.json")):
         self.path = config_path
         self.objects = []
+        print(f"Loading objects from {self.path}")
         with open(self.path, 'r') as f:
             data = json.load(f)
         for obj_data in data:
             self.objects.append(Obj.from_dict(obj_data))
+        print(f"Loaded {len(self.objects)} objects: {[obj.name for obj in self.objects]}")
 
 class ObjectDetector:
     def __init__(self, object_manager: ObjectManager, manager: SyncManager, flags: ProcessFlags):
@@ -75,9 +82,13 @@ class ObjectDetector:
         # Initialize timing stats with shared memory
         self.timing_stats = manager.dict({
             'pattern_matching': manager.list(),
-            'total_detection': manager.list()
+            'total_detection': manager.list(),
+            'tracking': manager.list()
         })
         self.max_stats_samples = 100  # Keep last 100 samples
+        
+        # Initialize object tracker
+        self.tracker = ObjectTracker()
 
     def start(self):
         """Start object detection process"""
@@ -89,11 +100,11 @@ class ObjectDetector:
                 print("ObjectDetector is already running")
                 return
                 
-                
         # Create new process
         self._running.set()
         self.detect_process = Process(target=self._detect_loop)
         self.detect_process.start()
+        print("ObjectDetector process started")
 
     def _update_timing(self, category: str, duration: float):
         """Update timing statistics for a category"""
@@ -129,11 +140,12 @@ class ObjectDetector:
         
     def _detect_loop(self):
         """Continuously detect objects from 3D points"""
+        import sys
+        print("ObjectDetector loop started", flush=True)
         while self._running.is_set():
             try:
-                
-                # Get world reconstruction data
                 ts, intrinsics, extrinsics, world_points, _ = self.input_queue.get(timeout=0.1)
+                print(f"Received {len(world_points)} points from world reconstructor", flush=True)
                 
                 if not world_points:
                     continue
@@ -143,22 +155,28 @@ class ObjectDetector:
                     'detect_start': time.time()
                 }
                 
-
                 # Detect objects from 3D points
-                detected_objects = self._detect_objects(world_points, timestamps)
+                detected_objects = self._detect_objects(world_points)
                 timestamps['detect_end'] = time.time()
                 
                 if detected_objects:
-                    output_data = (ts, detected_objects)
+                    print(f"Detected {len(detected_objects)} objects: {[obj.obj.name for obj in detected_objects]}", flush=True)
+                
+                # Track objects
+                tracking_start = time.time()
+                tracked_objects = self.tracker.update(detected_objects, ts)
+                timestamps['tracking_end'] = time.time()
+                
+                if tracked_objects:
+                    print(f"Tracking {len(tracked_objects)} objects: {[obj.obj.name for obj in tracked_objects]}", flush=True)
+                    output_data = (ts, tracked_objects)
                     try:
                         # Send to processing pipeline
                         self.output_queue.put(output_data, block=False)
                         # Also send to visualization (non-blocking)
                         self.viz_queue.put(output_data, block=False)
                     except Full:
-                        print("ObjectDetector output queue full")
-                
-                
+                        print("ObjectDetector output queue full", flush=True)
                 
             except Empty:
                 continue
@@ -167,81 +185,211 @@ class ObjectDetector:
         """Detect objects by matching LED patterns in 3D points"""
         
         detected_objects = []
+        if not points:
+            return detected_objects
+            
+        print(f"Detecting objects from {len(points)} points")
         points_array = np.array([[p.x, p.y, p.z] for p in points])
         
-        # Calculate pairwise distances between all points
+        # Calculate pairwise distances between all points (in mm)
         distances = np.sqrt(np.sum((points_array[:, None] - points_array[None, :]) ** 2, axis=2))
         
         # For each object type we're looking for
         for obj in self.objects:
-            # Get the pattern points
-            pattern = obj.points
-            
-            # Calculate pairwise distances in the pattern
-            pattern_distances = np.sqrt(np.sum((pattern[:, None] - pattern[None, :]) ** 2, axis=2))
-            
-            # Try to find matching distance patterns
-            used_points = set()
-            
-            # For each point as a potential first LED
-            for i in range(len(points)):
-                if i in used_points:
-                    continue
-                    
-                # Find points that could be other LEDs based on distances
-                potential_matches = []
-                for pattern_idx in range(len(pattern)):
-                    matches = []
-                    for j in range(len(points)):
-                        if j == i or j in used_points:
-                            continue
-                        # Check if distance matches any pattern distance (with tolerance)
-                        dist = distances[i, j]
-                        pattern_dists = pattern_distances[pattern_idx]
-                        if any(abs(dist - pd/1000) < 0.02 for pd in pattern_dists):  # Convert mm to m, 2cm tolerance
-                            matches.append(j)
-                    potential_matches.append(matches)
+            if obj.type == "drone":
+                #print(f"Looking for object pattern: {obj.name}")
+                # Get the pattern points
+                pattern = obj.points
                 
-                # If we found potential matches for all pattern points
-                if all(potential_matches):
-                    # Try all combinations of potential matches
-                    from itertools import product
-                    for match_combination in product(*potential_matches):
-                        if len(set(match_combination)) != len(match_combination):
-                            continue  # Skip if same point used multiple times
+                # Calculate pairwise distances in the pattern (in mm)
+                pattern_distances = np.sqrt(np.sum((pattern[:, None] - pattern[None, :]) ** 2, axis=2))
+                print(f"Pattern distances:\n{pattern_distances}")
+                
+                # Try to find matching distance patterns
+                used_points = set()
+                
+                # For each point as a potential first LED
+                for i in range(len(points)):
+                    if i in used_points:
+                        continue
+                        
+                    print(f"\nTrying point {i} as first LED")
+                    # Find points that could be other LEDs based on distances
+                    potential_matches = []
+                    for pattern_idx in range(len(pattern)):
+                        matches = []
+                        for j in range(len(points)):
+                            if j == i or j in used_points:
+                                continue
+                            # Check if distance matches any pattern distance (with tolerance)
+                            dist = distances[i, j]
+                            pattern_dists = pattern_distances[pattern_idx]
+                            # Use 20mm tolerance
+                            if any(abs(dist - pd) < 20 for pd in pattern_dists):
+                                matches.append(j)
+                                print(f"Point {j} matches pattern point {pattern_idx} with distance {dist:.1f}mm")
+                        potential_matches.append(matches)
+                    
+                    # If we found potential matches for all pattern points
+                    if all(potential_matches):
+                        print(f"Found potential matches for all pattern points: {potential_matches}")
+                        # Try all combinations of potential matches
+                        from itertools import product
+                        for match_combination in product(*potential_matches):
+                            if len(set(match_combination)) != len(match_combination):
+                                continue  # Skip if same point used multiple times
+                                
+                            # Get matched points
+                            matched_points = [points[i]] + [points[idx] for idx in match_combination]
+                            matched_array = np.array([[p.x, p.y, p.z] for p in matched_points])
                             
-                        # Get matched points
-                        matched_points = [points[i]] + [points[idx] for idx in match_combination]
-                        matched_array = np.array([[p.x, p.y, p.z] for p in matched_points])
-                        
-                        # Calculate center position
-                        center = np.mean(matched_array, axis=0)
-                        
-                        # Calculate rotation (heading) from first two points
-                        direction = matched_array[1] - matched_array[0]
-                        heading = np.arctan2(direction[1], direction[0])
-                        
-                        # Calculate match confidence based on distance errors
-                        errors = []
-                        for p1_idx in range(len(matched_array)):
-                            for p2_idx in range(p1_idx + 1, len(matched_array)):
-                                actual_dist = np.linalg.norm(matched_array[p1_idx] - matched_array[p2_idx])
-                                pattern_dist = np.linalg.norm(pattern[p1_idx] - pattern[p2_idx]) / 1000  # mm to m
-                                errors.append(abs(actual_dist - pattern_dist))
-                        confidence = np.exp(-np.mean(errors) * 10)  # Convert errors to confidence score
-                        
-                        if confidence > 0.5:  # Only accept high confidence detections
-                            detected_objects.append(DetectedObject(
-                                obj=obj,
-                                position=center,
-                                rotation=heading,
-                                confidence=confidence,
-                                led_points=matched_points
-                            ))
-                            used_points.update([i] + list(match_combination))
-                            break
+                            # Calculate center position
+                            center = np.mean(matched_array, axis=0)
+                            
+                            # Calculate rotation (heading) from first two points
+                            direction = matched_array[1] - matched_array[0]
+                            heading = np.arctan2(direction[1], direction[0])
+                            
+                            # Calculate match confidence based on distance errors
+                            errors = []
+                            for p1_idx in range(len(matched_array)):
+                                for p2_idx in range(p1_idx + 1, len(matched_array)):
+                                    actual_dist = np.linalg.norm(matched_array[p1_idx] - matched_array[p2_idx])
+                                    pattern_dist = np.linalg.norm(pattern[p1_idx] - pattern[p2_idx])
+                                    errors.append(abs(actual_dist - pattern_dist))
+                            confidence = np.exp(-np.mean(errors) * 0.01)  # Adjusted for mm scale
+                            
+                            print(f"Match confidence: {confidence:.3f}")
+                            if confidence > 0.5:  # Only accept high confidence detections
+                                print(f"Found object {obj.name} with confidence {confidence:.3f}")
+                                detected_objects.append(DetectedObject(
+                                    obj=obj,
+                                    position=center,
+                                    rotation=[heading, 0, 0],
+                                    confidence=confidence,
+                                    led_points=matched_points
+                                ))
+                                used_points.update([i] + list(match_combination))
+                                break
         
+        print(f"Detected {len(detected_objects)} objects")
         return detected_objects
+
+class ObjectTracker:
+    def __init__(self):
+        # State transition matrix (position, velocity, rotation, angular velocity)
+        self.F = np.array([
+            [1, 0, 0, 1, 0, 0, 0, 0],  # x = x + vx
+            [0, 1, 0, 0, 1, 0, 0, 0],  # y = y + vy
+            [0, 0, 1, 0, 0, 1, 0, 0],  # z = z + vz
+            [0, 0, 0, 1, 0, 0, 0, 0],  # vx = vx
+            [0, 0, 0, 0, 1, 0, 0, 0],  # vy = vy
+            [0, 0, 0, 0, 0, 1, 0, 0],  # vz = vz
+            [0, 0, 0, 0, 0, 0, 1, 1],  # theta = theta + omega
+            [0, 0, 0, 0, 0, 0, 0, 1]   # omega = omega
+        ])
+        
+        # Measurement matrix (we only measure position and rotation)
+        self.H = np.array([
+            [1, 0, 0, 0, 0, 0, 0, 0],  # x
+            [0, 1, 0, 0, 0, 0, 0, 0],  # y
+            [0, 0, 1, 0, 0, 0, 0, 0],  # z
+            [0, 0, 0, 0, 0, 0, 1, 0]   # theta
+        ])
+        
+        # Process noise covariance
+        self.Q = np.eye(8) * 0.1
+        
+        # Measurement noise covariance
+        self.R = np.eye(4) * 0.1
+        
+        # Tracked objects dictionary: {object_id: (kalman_filter, last_update_time)}
+        self.tracked_objects = {}
+        self.next_id = 0
+        
+        # Maximum time between updates before considering track lost
+        self.max_time_between_updates = 0.5  # seconds
+        
+    def update(self, detected_objects: List[DetectedObject], timestamp: float) -> List[DetectedObject]:
+        """Update tracked objects with new detections"""
+        # Convert detections to measurement format
+        measurements = []
+        for obj in detected_objects:
+            measurement = np.array([
+                obj.position[0],  # x
+                obj.position[1],  # y
+                obj.position[2],  # z
+                obj.rotation[0]   # theta
+            ])
+            measurements.append((measurement, obj))
+            
+        # Update existing tracks
+        updated_objects = []
+        for track_id, (kf, last_update) in self.tracked_objects.items():
+            # Check if track is too old
+            if timestamp - last_update > self.max_time_between_updates:
+                continue
+                
+            # Predict
+            kf.predict()
+            
+            # Find best matching detection
+            best_match = None
+            best_match_dist = float('inf')
+            for measurement, obj in measurements:
+                # Calculate distance between predicted and measured position
+                predicted_pos = kf.x[:3]  # First 3 elements are position
+                measured_pos = measurement[:3]
+                dist = np.linalg.norm(predicted_pos - measured_pos)
+                
+                if dist < best_match_dist:
+                    best_match_dist = dist
+                    best_match = (measurement, obj)
+            
+            # Update if good match found
+            if best_match is not None and best_match_dist < 0.5:  # 50cm threshold
+                measurement, obj = best_match
+                kf.update(measurement)
+                measurements.remove((measurement, obj))
+                
+                # Create updated object
+                state = kf.x
+                updated_obj = DetectedObject(
+                    obj=obj.obj,
+                    position=state[:3],
+                    rotation=[state[6], 0, 0],  # Only track yaw for now
+                    confidence=obj.confidence,
+                    led_points=obj.led_points
+                )
+                updated_objects.append(updated_obj)
+                
+                # Update last update time
+                self.tracked_objects[track_id] = (kf, timestamp)
+        
+        # Create new tracks for unmatched detections
+        for measurement, obj in measurements:
+            # Initialize Kalman filter
+            kf = cv2.KalmanFilter(8, 4)  # 8 state variables, 4 measurements
+            kf.transitionMatrix = self.F
+            kf.measurementMatrix = self.H
+            kf.processNoiseCov = self.Q
+            kf.measurementNoiseCov = self.R
+            
+            # Initialize state
+            initial_state = np.zeros(8)
+            initial_state[:3] = measurement[:3]  # Position
+            initial_state[6] = measurement[3]    # Rotation
+            kf.statePre = initial_state
+            kf.statePost = initial_state
+            
+            # Add to tracked objects
+            self.tracked_objects[self.next_id] = (kf, timestamp)
+            self.next_id += 1
+            
+            # Add to updated objects
+            updated_objects.append(obj)
+        
+        return updated_objects
 
 class ObjectsManager:
     def __init__(self, path: Path = 'config/objects.json'):

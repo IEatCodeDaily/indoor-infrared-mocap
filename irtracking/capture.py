@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-import queue
+from queue import Full, Empty
 from .params import CameraParamsManager, IntrinsicParams, ProcessFlags
 from typing import List, Optional, Tuple
 import multiprocessing
@@ -33,9 +33,9 @@ class PointDetector:
         # input_queue: (timestamp, camera_id, IntrinsicParams, ExtrinsicParams, frame)
         # output_queue: (timestamp, camera_id, IntrinsicParams, ExtrinsicParams, points, processed_frame)
         # viz_queue: same as output_queue but non-blocking
-        self.input_queue = Queue(maxsize=10)
-        self.output_queue = Queue(maxsize=10)
-        self.viz_queue = Queue(maxsize=10)
+        self.input_queue = Queue(maxsize=60)
+        self.output_queue = Queue(maxsize=60)
+        self.viz_queue = Queue(maxsize=60)
 
         # TODO: Move output queue to world reconstructor
         # TODO: Move viz queue to collector
@@ -110,10 +110,9 @@ class PointDetector:
         """Continuously detect points in frames"""
         last_ts = 0
         while self._running.is_set():
-            
             try:
                 # Get input data
-                ts, cam_id, intrinsic, extrinsic, frame = self.input_queue.get(timeout=0.1)
+                ts, cam_id, intrinsic, extrinsic, frame, frame_number = self.input_queue.get(timeout=0.1)
                 
                 # Skip if this frame is older than our last processed frame
                 if ts < last_ts:
@@ -122,36 +121,34 @@ class PointDetector:
                 last_ts = ts
 
                 # Detect points using the provided camera parameters
-                points, processed_frame = self.detect_points(frame, intrinsic)
+                points, confidences, processed_frame = self.detect_points(frame, intrinsic)
                 
                 # Create output data bundle
-                output_data = (ts, cam_id, intrinsic, extrinsic, points, processed_frame)
+                output_data = (ts, cam_id, intrinsic, extrinsic, points, confidences, processed_frame, frame_number)
                 
                 try:
                     # Clear old frames from output queue
                     while True:
                         try:
                             self.output_queue.get_nowait()
-                        except queue.Empty:
+                        except Empty:
                             break
-                            
                     # Send to processing pipeline
                     self.output_queue.put(output_data, timeout=0.1)
-                    
-                    # Also send to visualization (non-blocking)
-                    try:
-                        self.viz_queue.put(output_data, block=False)
-                    except queue.Full:
-                        # If viz queue is full, that's okay - just skip
-                        pass
-                except queue.Full:
+                except Full:
                     print(f"PointDetector {self.camera_id} output queue full")
                     
-                    
-            except queue.Empty:
-                continue
+                # Clear old frames from viz queue before adding new one
+                try:
+                    self.viz_queue.put(output_data, block=False)
+                except Full:
+                    print(f"PointDetector {self.camera_id} viz queue full")
+                    # If viz queue is full, that's okay - just skip
+                    pass
+            except Empty:
+                pass
 
-    def detect_points(self, frame: np.ndarray, intrinsic: IntrinsicParams) -> Tuple[List[Tuple[Point2D, float]], np.ndarray]:
+    def detect_points(self, frame: np.ndarray, intrinsic: IntrinsicParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Detect IR LED points in frame"""
         process_start = time.time()
         
@@ -176,7 +173,8 @@ class PointDetector:
                          [-1,  1,  3,  1, -1],
                          [-2, -1, -1, -1, -2]])
         filtered = cv2.filter2D(gray, -1, kernel)
-        binary = cv2.threshold(filtered, 124, 255, cv2.THRESH_BINARY)[1]
+        
+        binary = cv2.threshold(filtered, 255*0.8, 255, cv2.THRESH_BINARY)[1]
         morph = cv2.erode(binary, self.morph_kernel, iterations=1)
         
         # Find contours
@@ -184,6 +182,7 @@ class PointDetector:
         
         # Process contours to find points
         points = []
+        confidences = []
         for contour in contours:
             M = cv2.moments(contour)
             if M["m00"] != 0:
@@ -191,7 +190,8 @@ class PointDetector:
                 cy = float(M["m01"] / M["m00"])
                 area = cv2.contourArea(contour)
                 confidence = max(0.0, 1.0 - area / 1000)
-                points.append((Point2D(cx, cy), confidence))
+                points.append([cx, cy])
+                confidences.append(confidence)
         
         process_end = time.time()
         if self.flags.get_flag('timing_enabled'):
@@ -199,4 +199,4 @@ class PointDetector:
             self._update_timing('point_detection', process_end - detect_start)
             self._update_timing('total_processing', process_end - process_start)
         
-        return points, morph, 
+        return np.array(points), np.array(confidences), morph

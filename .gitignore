@@ -43,3 +43,6 @@ footage_calibration
 
 # Pytest cache
 .pytest_cache
+
+# Poetry
+poetry.lock
