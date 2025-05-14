@@ -20,7 +20,6 @@ class Obj:
     dimensions: int
     metadata: Dict[str, Any]
     points: np.ndarray  # contains 2D or 3D points
-    type: str
     
     @classmethod
     def from_dict(cls, data: Dict) -> 'Obj':
@@ -29,8 +28,7 @@ class Obj:
             type=data['type'],
             dimensions=data['dimensions'],
             metadata=data['metadata'],
-            points=np.array(data['points'], dtype=np.float64),
-            type=data['type']
+            points=np.array(data['points'], dtype=np.float64)
         )
     
     def to_dict(self) -> Dict:
@@ -39,8 +37,7 @@ class Obj:
             'type': self.type,
             'dimensions': self.dimensions,
             'metadata': self.metadata,
-            'points': self.points.tolist(),
-            'type': self.type
+            'points': self.points.tolist()
         }
 
 @dataclass

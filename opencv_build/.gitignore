@@ -1,9 +1,0 @@
-# opencv build and install directory
-build/
-install/
-
-# test scripts
-test*
-
-# scripts output
-*.json

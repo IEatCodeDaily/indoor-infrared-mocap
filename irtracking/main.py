@@ -25,9 +25,9 @@ except ImportError as e:
     print(f"Failed to import pseyepy: {e}")
     raise
 
-
 # TODO:
 # - Fix ProcessFlags and TimingStats
+# - Add Gain and Exposure settings
 
 class TrackingGUI:
     def __init__(self, root: tk.Tk):
@@ -132,7 +132,7 @@ class TrackingGUI:
         # Initialize detectors
         self.detectors = [
             PointDetector(i, self.manager, flags=self.process_flags) 
-            for i in range(len(self.cameras) if not live_mode else self.pseyepy_cameras.num_cameras)
+            for i in range(len(self.cameras) if not live_mode else pseyepy.cam_count())
         ]
         
         # Initialize world reconstructor
@@ -199,7 +199,7 @@ class TrackingGUI:
         try:
             print("Initializing pseyepy cameras...")
             print(f"Available camera count: {pseyepy.cam_count()}")
-            self.pseyepy_cameras = pseyepy.Camera(fps=60, resolution=pseyepy.Camera.RES_LARGE, gain=10, exposure=100)
+            self.pseyepy_cameras = pseyepy.Camera(fps=60, resolution=pseyepy.Camera.RES_LARGE, gain=50, exposure=100)
             print("Successfully created pseyepy Camera object")
         except Exception as e:
             print(f"Failed to initialize pseyepy cameras: {e}")
@@ -214,7 +214,6 @@ class TrackingGUI:
         # For live mode, self.cameras is not used, but we clear it for safety
         self.cameras = []
         
-        print(f"Initialized {self.pseyepy_cameras.num_cameras} pseyepy cameras")
         
         # Initialize system components
         self.initialize_system(live_mode=True)
@@ -293,14 +292,12 @@ class TrackingGUI:
             
         # Stop pseyepy cameras if in live mode
         if self.is_live_mode:
-            for camera in self.pseyepy_cameras:
-                camera.stop()
             self.pseyepy_cameras = []
-            
-        # Release OpenCV captures
-        for camera in self.cameras:
-            camera.release()
-        self.cameras = []
+        else:    
+            # Release OpenCV captures
+            for camera in self.cameras:
+                camera.release()
+            self.cameras = []
         
         # Clear system components
         self.detectors = []

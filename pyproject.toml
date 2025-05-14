@@ -20,7 +20,7 @@ scipy = "^1.14.1"
 rerun-sdk = "^0.21.0"
 scikit-learn = "^1.6.1"
 cython = "^3.1.0"
-pseyepy = "^0.0.1"
+opencv-python = "^4.11.0.86"
 
 [tool.poetry.group.dev]
 optional = true

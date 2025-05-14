@@ -11,7 +11,7 @@ from multiprocessing import Queue
 from multiprocessing.managers import SyncManager
 import numpy as np
 from collections import deque
-#from pseyepy import Camera
+import pseyepy
 
 # TODO:
 # - Add pseyepy
@@ -107,7 +107,7 @@ class LocalizationSystem:
             # Live mode: read from pseyepy.Camera
             print("[LocalizationSystem] Entering live mode feed loop.")
             params = {}
-            for i in range(self.cameras.num_cameras):
+            for i in range(pseyepy.cam_count()):
                 intrinsic = self.params_manager.get_intrinsic_params(i)
                 extrinsic = self.params_manager.get_extrinsic_params(i)
                 if intrinsic is None:
@@ -124,8 +124,8 @@ class LocalizationSystem:
                 feed_start = time.time()
                 frames, _ = self.cameras.read()
                 ts = time.time()
-                if frames is None or len(frames) != self.cameras.num_cameras:
-                    print(f"[LocalizationSystem] Live mode: got {len(frames) if frames is not None else 0}/{self.cameras.num_cameras} frames")
+                if frames is None or len(frames) != pseyepy.cam_count():
+                    print(f"[LocalizationSystem] Live mode: got {len(frames) if frames is not None else 0}/{pseyepy.cam_count()} frames")
                     continue
                 for detector, frame, cam_id in zip(self.detectors, frames, range(len(frames))):
                     if detector.camera_id not in params:
